@@ -1,0 +1,2 @@
+# test_supabase
+supabaseが正常に動作するか確認する用のテストリポジトリ
