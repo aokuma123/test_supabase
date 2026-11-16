@@ -33,14 +33,9 @@ QUESTIONS = [
 # 2. DB保存処理
 # ---------------------------------------------------------
 def save_responses_to_supabase(session_id: str, answers: dict):
-    conn = psycopg2.connect(
-        host=st.secrets["SUPABASE_DB_HOST"],
-        port=int(st.secrets.get("SUPABASE_DB_PORT", 5432)),
-        dbname=st.secrets.get("SUPABASE_DB_NAME", "postgres"),
-        user=st.secrets["SUPABASE_DB_USER"],
-        password=st.secrets["SUPABASE_DB_PASSWORD"],
-        sslmode="require"
-    )
+    # .streamlit/secrets.toml の [supabase] -> database_url を使用
+    db_url = st.secrets["supabase"]["database_url"]
+    conn = psycopg2.connect(db_url, sslmode="require")
     try:
         with conn:
             with conn.cursor() as cur:
