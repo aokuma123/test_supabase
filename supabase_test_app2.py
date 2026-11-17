@@ -2,11 +2,12 @@ import streamlit as st
 import psycopg2
 import uuid
 import time
+import math
 
 # ---------------------------------------------------------
 # 0. 定数設定
 # ---------------------------------------------------------
-TIME_LIMIT_SECONDS = 60  # 制限時間：1分（60秒）（変更中）
+TIME_LIMIT_SECONDS = 120  # テスト用制限時間：2分（120秒）
 
 # ---------------------------------------------------------
 # 1. テスト用問題データ（全3問・四択穴埋め）
@@ -52,7 +53,7 @@ def save_responses_to_supabase(session_id: str, answers: dict, is_timeout: bool 
                         status = "answered"
                         is_correct = 1 if selected == q["answer"] else 0
                     else:
-                        # 仕様書に合わせ、未回答は誤答(0)ではなく NULL（欠測）として記録
+                        # 未回答は誤答(0)ではなく NULL（欠測）として記録
                         status = "unanswered_timeout" if is_timeout else "unanswered"
                         is_correct = None
 
@@ -96,45 +97,44 @@ def reset_quiz():
     st.session_state.session_id = f"TEST_{uuid.uuid4().hex[:6].upper()}"
 
 # ---------------------------------------------------------
-# 4. 横棒タイマー（5秒ごとにこの部分だけ自動更新）
+# 4. タイマー表示（1分以上は分単位、1分未満は毎秒カウントダウン）
 # ---------------------------------------------------------
-@st.fragment(run_every=5)
+@st.fragment(run_every=1)
 def render_timer():
     if st.session_state.start_time is None:
         return
 
     elapsed = time.time() - st.session_state.start_time
-    remaining = max(0.0, TIME_LIMIT_SECONDS - elapsed)
-    ratio = remaining / TIME_LIMIT_SECONDS  # 1.0（開始時）〜 0.0（時間切れ）
+    remaining = max(0, int(math.ceil(TIME_LIMIT_SECONDS - elapsed)))
 
-    # 残り時間に応じたラベル表示（具体的な秒数は出さない）
-    if remaining <= 30:
-        label = "⏱️ 残り時間（まもなく終了します）"
-    else:
-        label = "⏱️ 残り時間"
-
-    # 横棒のゲージを表示（5秒ごとに短くなっていく）
-    st.progress(ratio, text=label)
-
-    # 3分経過したらフラグを立てて画面全体を再描画し、問題を閉じる
+    # タイムアップ判定
     if remaining <= 0 and not st.session_state.time_up:
         st.session_state.time_up = True
         st.rerun()
 
+    # 残り1分（60秒）未満になったら警告表示＋毎秒カウントダウン
+    if remaining < 60:
+        st.warning(f"⚠️ 残り時間が少なくなっています：残り **{remaining} 秒**")
+    else:
+        # 60秒以上のときは分単位（切り上げ）で表示（120〜61秒 → 2分、60秒 → 1分）
+        remaining_mins = math.ceil(remaining / 60)
+        st.info(f"⏱️ 残り時間：**約 {remaining_mins} 分**")
+
 # ---------------------------------------------------------
 # 5. 画面表示（UI）
 # ---------------------------------------------------------
-st.title("英文法クイズ 動作テスト（制限時間3分）")
+limit_mins = TIME_LIMIT_SECONDS // 60
+st.title(f"英文法クイズ 動作テスト（制限時間{limit_mins}分）")
 
 # 【画面1】スタート前
 if not st.session_state.started:
-    st.write("全3問の英文穴埋め四択問題です。制限時間は **3分** です（上部のバーで残り時間の目安が表示されます）。")
+    st.write(f"全3問の英文穴埋め四択問題です。制限時間は **{limit_mins}分** です。")
     st.session_state.session_id = st.text_input(
         "参加者コード（テスト用ID）", value=st.session_state.session_id
     )
     if st.button("スタート", type="primary"):
         st.session_state.started = True
-        st.session_state.start_time = time.time()  # 開始時刻を記録
+        st.session_state.start_time = time.time()
         st.rerun()
 
 # 【画面4】送信完了後
@@ -160,7 +160,7 @@ elif st.session_state.submitted:
         reset_quiz()
         st.rerun()
 
-# 【画面3】タイムアップ時（3分経過後：問題を閉じて送信ボタンのみ表示）
+# 【画面3】タイムアップ時（制限時間経過後：問題を閉じて送信ボタンのみ表示）
 elif st.session_state.time_up:
     st.error("⏰ 制限時間が経過したため、回答を終了しました。")
     answered_count = len(st.session_state.answers)
@@ -181,7 +181,7 @@ elif st.session_state.time_up:
 
 # 【画面2】クイズ回答中（制限時間内）
 else:
-    # 上部に5秒更新の横棒タイマーを表示
+    # 上部にタイマーを表示
     render_timer()
 
     idx = st.session_state.current_idx
