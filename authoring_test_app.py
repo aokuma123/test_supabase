@@ -1,10 +1,10 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import psycopg2
 from psycopg2.extras import Json
 import json
 import re
 import uuid
-import html
 
 # ---------------------------------------------------------
 # 0. ページ設定とサンプルJSONデータ（他担当者出力の想定形式）
@@ -43,30 +43,6 @@ ADVANCED_WORDS_SAMPLE = {
     "prestigious", "symposium", "ubiquitous", "exacerbated",
     "controversy", "ambiguous", "subsequently", "deteriorate"
 }
-
-# ---------------------------------------------------------
-# 補助関数：長い英文を折り返さず横スクロールバーで表示するコンポーネント
-# ---------------------------------------------------------
-def render_horizontal_scroll_box(label: str, text: str):
-    safe_text = html.escape(text)
-    st.markdown(f"**{label}**")
-    st.markdown(
-        f"""
-        <div style="
-            width: 100%;
-            overflow-x: auto;
-            white-space: nowrap;
-            padding: 12px 14px;
-            border: 1px solid rgba(128, 128, 128, 0.35);
-            border-radius: 6px;
-            background-color: rgba(128, 128, 128, 0.08);
-            font-family: 'Source Code Pro', monospace, sans-serif;
-            font-size: 1.05rem;
-            margin-bottom: 12px;
-        ">{safe_text}</div>
-        """,
-        unsafe_allow_html=True
-    )
 
 # ---------------------------------------------------------
 # 1. 第1段階：英文・判定結果のRasch分析適性判定ロジック
@@ -135,7 +111,7 @@ def validate_question_options(question_text: str, options: list, correct_answer:
     return errors
 
 # ---------------------------------------------------------
-# 3. DB保存処理（解説は空文字で保存）
+# 3. DB保存処理
 # ---------------------------------------------------------
 def save_question_to_db(record: dict):
     db_url = st.secrets["supabase"]["database_url"]
@@ -182,44 +158,83 @@ def save_question_to_db(record: dict):
         conn.close()
 
 # ---------------------------------------------------------
-# 4. メインUI（横幅を広く使う縦積みレイアウト）
+# 4. 状態管理（JSON選択変更時に画面トップへスクロール）
 # ---------------------------------------------------------
-st.title("🛠️ Rasch分析適性判定・作問支援ツール（プロトタイプ）")
-st.caption("JSON読込 → 第1段階：Rasch適性判定・リライト支援 → 第2段階：四択作成・一意性検証 → DB登録")
+if "scroll_to_top" not in st.session_state:
+    st.session_state.scroll_to_top = False
 
-# --- サイドバー：JSONデータの読み込み ---
+def on_item_change():
+    st.session_state.scroll_to_top = True
+
+# --- サイドバー：作問対象選択（最上部）＋ JSON読込 ---
 with st.sidebar:
-    st.header("1. 文法判定JSONの読込")
+    if "json_items" in st.session_state and st.session_state.json_items:
+        st.header("1. 作問対象の英文を選択")
+        items = st.session_state.json_items
+        item_labels = [
+            f"{it.get('item_id', idx)} | [{it.get('grammar_label', '不明')}] {it.get('sentence', '')}"
+            for idx, it in enumerate(items)
+        ]
+        selected_idx = st.selectbox(
+            "問題を選択（変更で画面上部へ移動）：",
+            range(len(items)),
+            format_func=lambda i: item_labels[i],
+            key="selected_json_idx",
+            on_change=on_item_change
+        )
+        st.divider()
+
+    st.header("2. 文法判定JSONの読込")
     uploaded_file = st.file_uploader("判定結果JSONファイルをアップロード", type=["json"])
 
     if uploaded_file is not None:
         try:
             loaded = json.load(uploaded_file)
             st.session_state.json_items = loaded if isinstance(loaded, list) else [loaded]
+            st.session_state.scroll_to_top = True
             st.success(f"{len(st.session_state.json_items)} 件のデータを読み込みました。")
         except Exception as e:
             st.error(f"JSON読込エラー: {e}")
 
     if st.button("サンプルJSONを読み込む（テスト用）", use_container_width=True):
         st.session_state.json_items = SAMPLE_JSON_DATA
+        st.session_state.scroll_to_top = True
         st.rerun()
 
-if "json_items" not in st.session_state:
+# 対象が変更された直後は画面の一番上へスクロールさせる
+if st.session_state.scroll_to_top:
+    st.session_state.scroll_to_top = False
+    components.html(
+        """
+        <script>
+            const mainSection = window.parent.document.querySelector('section.main');
+            if (mainSection) {
+                mainSection.scrollTo({top: 0, behavior: 'smooth'});
+            }
+            window.parent.scrollTo({top: 0, behavior: 'smooth'});
+        </script>
+        """,
+        height=0
+    )
+
+# ---------------------------------------------------------
+# 5. メインUI
+# ---------------------------------------------------------
+st.title("🛠️ Rasch分析適性判定・作問支援ツール（プロトタイプ）")
+st.caption("JSON読込 → 第1段階：Rasch適性判定・リライト支援 → 第2段階：四択作成・一意性検証 → DB登録")
+
+if "json_items" not in st.session_state or not st.session_state.json_items:
     st.info("👈 左のサイドバーから文法判定JSONをアップロードするか、「サンプルJSONを読み込む」を押してください。")
     st.stop()
 
 items = st.session_state.json_items
-item_labels = [
-    f"{it.get('item_id', idx)} | [{it.get('grammar_label', '不明')}] {it.get('sentence', '')}"
-    for idx, it in enumerate(items)
-]
-selected_idx = st.selectbox("作問対象のデータを選択：", range(len(items)), format_func=lambda i: item_labels[i])
+selected_idx = st.session_state.get("selected_json_idx", 0)
 current_item = items[selected_idx]
 
 st.divider()
 
 # =========================================================
-# 第1段階：英文段階のRasch適性判定・修正支援（画面全幅）
+# 第1段階：英文段階のRasch適性判定・修正支援
 # =========================================================
 st.header("🔍 第1段階：Rasch分析適性判定・修正支援")
 
@@ -230,13 +245,12 @@ st.markdown(f"- **判定根拠：** {current_item.get('reason', '（記載なし
 orig_sentence = current_item.get("sentence", "")
 target_phrase = current_item.get("target_phrase", "")
 
-# 元の入力英文を横スクロール可能な1行ボックスで全文表示
-render_horizontal_scroll_box("元の入力英文（横スクロールで全文確認）", orig_sentence)
+st.text_area("元の入力英文（読み取り専用）", value=orig_sentence, height=75, disabled=True)
 
-# リライト入力欄（横幅いっぱい）
-edited_sentence = st.text_input(
-    "作問用英文（要修正の場合はここでリライトして再判定・横スクロール可）",
+edited_sentence = st.text_area(
+    "作問用英文（要修正の場合はここでリライトして再判定）",
     value=orig_sentence,
+    height=80,
     key=f"edit_sent_{selected_idx}"
 )
 
@@ -262,24 +276,21 @@ with st.expander("抽出された英文特徴メタデータ（分析用）"):
 st.divider()
 
 # =========================================================
-# 第2段階：作問支援UI・選択肢作成・一意性検証（画面全幅）
+# 第2段階：作問支援UI・選択肢作成・一意性検証
 # =========================================================
 st.header("✏️ 第2段階：作問支援UI・一意性検証")
 
-# 対象箇所を自動空欄化した雛形を生成
 if target_phrase and target_phrase in edited_sentence:
     template_q = edited_sentence.replace(target_phrase, "(      )", 1)
 else:
     template_q = edited_sentence
 
-question_text = st.text_input(
-    "問題文の編集（空欄は `(      )` で表記・横スクロール可）",
+question_text = st.text_area(
+    "問題文の編集（空欄は `(      )` で表記）",
     value=template_q,
+    height=80,
     key=f"q_text_{selected_idx}"
 )
-
-# 編集中の問題文も横スクロールバー付きボックスでプレビュー
-render_horizontal_scroll_box("出題プレビュー（横スクロールで全文確認）", question_text)
 
 st.markdown("**四択の選択肢（1つ目を正解として入力し、出題時にシャッフルする想定）**")
 c1, c2 = st.columns(2)
@@ -290,11 +301,7 @@ with c2:
     opt_d1 = st.text_input("選択肢2（誤答肢1）", value="", key=f"opt2_{selected_idx}")
     opt_d3 = st.text_input("選択肢4（誤答肢3）", value="", key=f"opt4_{selected_idx}")
 
-st.markdown("**第2段階：一意性確認チェック**")
-chk_unique = st.checkbox(
-    "作成した4つの選択肢の中で、文脈上正解が1つだけに論理的に決まる（一意性確認済み）",
-    key=f"chk1_{selected_idx}"
-)
+st.info("ℹ️ **一意性確認**：作成した4つの選択肢の中で、文脈上正解が1つだけに論理的に決まることを確認してから保存してください。")
 
 q_id = st.text_input("登録用問題ID", value=f"Q_{current_item.get('item_id', uuid.uuid4().hex[:4])}", key=f"qid_{selected_idx}")
 
@@ -307,8 +314,6 @@ if st.button("検証してSupabaseに「確認済み」として保存", type="p
     elif val_errors:
         for err in val_errors:
             st.error(f"入力エラー：{err}")
-    elif not chk_unique:
-        st.error("一意性確認のチェックボックスにチェックを入れてください。")
     else:
         record = {
             "question_id": q_id.strip(),
@@ -318,7 +323,7 @@ if st.button("検証してSupabaseに「確認済み」として保存", type="p
             "question_text": question_text.strip(),
             "options": [o.strip() for o in options_list],
             "correct_answer": opt_correct.strip(),
-            "explanation": "",  # 今回は解説入力を省略
+            "explanation": "",
             "suitability_status": "suitable",
             "is_rewritten": is_rewritten,
             "review_status": "confirmed",
