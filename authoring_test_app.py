@@ -4,6 +4,7 @@ from psycopg2.extras import Json
 import json
 import re
 import uuid
+import html
 
 # ---------------------------------------------------------
 # 0. ページ設定とサンプルJSONデータ（他担当者出力の想定形式）
@@ -38,11 +39,34 @@ SAMPLE_JSON_DATA = [
 ]
 
 # 語彙ノイズ判定用の簡易チェックリスト（プロトタイプ用：難解・抽象語の例）
-# ※本番実装時はNGSLや中学・高校基礎語彙リスト（CSV等）に差し替え可能
 ADVANCED_WORDS_SAMPLE = {
     "prestigious", "symposium", "ubiquitous", "exacerbated",
     "controversy", "ambiguous", "subsequently", "deteriorate"
 }
+
+# ---------------------------------------------------------
+# 補助関数：長い英文を折り返さず横スクロールバーで表示するコンポーネント
+# ---------------------------------------------------------
+def render_horizontal_scroll_box(label: str, text: str):
+    safe_text = html.escape(text)
+    st.markdown(f"**{label}**")
+    st.markdown(
+        f"""
+        <div style="
+            width: 100%;
+            overflow-x: auto;
+            white-space: nowrap;
+            padding: 12px 14px;
+            border: 1px solid rgba(128, 128, 128, 0.35);
+            border-radius: 6px;
+            background-color: rgba(128, 128, 128, 0.08);
+            font-family: 'Source Code Pro', monospace, sans-serif;
+            font-size: 1.05rem;
+            margin-bottom: 12px;
+        ">{safe_text}</div>
+        """,
+        unsafe_allow_html=True
+    )
 
 # ---------------------------------------------------------
 # 1. 第1段階：英文・判定結果のRasch分析適性判定ロジック
@@ -54,7 +78,6 @@ def evaluate_rasch_suitability(sentence: str, target_phrase: str, detected_gramm
     issues = []
     suggestions = []
 
-    # 単語リスト抽出
     words = re.findall(r"[A-Za-z']+", sentence)
     word_count = len(words)
     lower_words = [w.lower() for w in words]
@@ -112,7 +135,7 @@ def validate_question_options(question_text: str, options: list, correct_answer:
     return errors
 
 # ---------------------------------------------------------
-# 3. DB保存処理
+# 3. DB保存処理（解説は空文字で保存）
 # ---------------------------------------------------------
 def save_question_to_db(record: dict):
     db_url = st.secrets["supabase"]["database_url"]
@@ -159,10 +182,10 @@ def save_question_to_db(record: dict):
         conn.close()
 
 # ---------------------------------------------------------
-# 4. メインUI
+# 4. メインUI（横幅を広く使う縦積みレイアウト）
 # ---------------------------------------------------------
 st.title("🛠️ Rasch分析適性判定・作問支援ツール（プロトタイプ）")
-st.caption("仕様書 v2.3 準拠：JSON読込 → Rasch適性判定・リライト支援 → 四択・解説作成・一意性検証 → DB登録")
+st.caption("JSON読込 → 第1段階：Rasch適性判定・リライト支援 → 第2段階：四択作成・一意性検証 → DB登録")
 
 # --- サイドバー：JSONデータの読み込み ---
 with st.sidebar:
@@ -186,129 +209,123 @@ if "json_items" not in st.session_state:
     st.stop()
 
 items = st.session_state.json_items
-item_labels = [f"{it.get('item_id', idx)} | [{it.get('grammar_label', '不明')}] {it.get('sentence', '')[:45]}..." for idx, it in enumerate(items)]
+item_labels = [
+    f"{it.get('item_id', idx)} | [{it.get('grammar_label', '不明')}] {it.get('sentence', '')}"
+    for idx, it in enumerate(items)
+]
 selected_idx = st.selectbox("作問対象のデータを選択：", range(len(items)), format_func=lambda i: item_labels[i])
 current_item = items[selected_idx]
 
 st.divider()
 
-# --- 2カラム構成：左（第1段階：適性判定・リライト） / 右（第2段階：作問・一意性検証） ---
-col_left, col_right = st.columns([1, 1], gap="large")
+# =========================================================
+# 第1段階：英文段階のRasch適性判定・修正支援（画面全幅）
+# =========================================================
+st.header("🔍 第1段階：Rasch分析適性判定・修正支援")
+
+st.markdown(f"- **対象文法ラベル：** `{current_item.get('grammar_label', '')}`")
+st.markdown(f"- **検出された文法要素：** `{', '.join(current_item.get('detected_grammars', []))}`")
+st.markdown(f"- **判定根拠：** {current_item.get('reason', '（記載なし）')}")
+
+orig_sentence = current_item.get("sentence", "")
+target_phrase = current_item.get("target_phrase", "")
+
+# 元の入力英文を横スクロール可能な1行ボックスで全文表示
+render_horizontal_scroll_box("元の入力英文（横スクロールで全文確認）", orig_sentence)
+
+# リライト入力欄（横幅いっぱい）
+edited_sentence = st.text_input(
+    "作問用英文（要修正の場合はここでリライトして再判定・横スクロール可）",
+    value=orig_sentence,
+    key=f"edit_sent_{selected_idx}"
+)
+
+is_rewritten = (edited_sentence.strip() != orig_sentence.strip())
+
+# リアルタイムで適性判定を実行
+is_suitable, issues, suggestions, meta_features = evaluate_rasch_suitability(
+    edited_sentence,
+    target_phrase,
+    current_item.get("detected_grammars", [current_item.get("grammar_label", "")])
+)
+
+if is_suitable:
+    st.success("✅ **適性判定：OK（Rasch分析に適しています）**")
+else:
+    st.warning("⚠️ **適性判定：要修正（Rasch分析の前提を損なう恐れがあります）**")
+    for iss, sug in zip(issues, suggestions):
+        st.markdown(f"- {iss}\n  - 💡 **修正案：** {sug}")
+
+with st.expander("抽出された英文特徴メタデータ（分析用）"):
+    st.json(meta_features)
+
+st.divider()
 
 # =========================================================
-# 左カラム：第1段階（英文段階のRasch適性判定・修正支援）
+# 第2段階：作問支援UI・選択肢作成・一意性検証（画面全幅）
 # =========================================================
-with col_left:
-    st.subheader("🔍 第1段階：Rasch分析適性判定・修正支援")
+st.header("✏️ 第2段階：作問支援UI・一意性検証")
 
-    st.markdown(f"**対象文法ラベル：** `{current_item.get('grammar_label', '')}`")
-    st.markdown(f"**検出された文法要素：** `{', '.join(current_item.get('detected_grammars', []))}`")
-    st.markdown(f"**判定根拠：** {current_item.get('reason', '（記載なし）')}")
+# 対象箇所を自動空欄化した雛形を生成
+if target_phrase and target_phrase in edited_sentence:
+    template_q = edited_sentence.replace(target_phrase, "(      )", 1)
+else:
+    template_q = edited_sentence
 
-    orig_sentence = current_item.get("sentence", "")
-    target_phrase = current_item.get("target_phrase", "")
+question_text = st.text_input(
+    "問題文の編集（空欄は `(      )` で表記・横スクロール可）",
+    value=template_q,
+    key=f"q_text_{selected_idx}"
+)
 
-    st.text_area("元の入力英文（読み取り専用）", value=orig_sentence, height=70, disabled=True)
+# 編集中の問題文も横スクロールバー付きボックスでプレビュー
+render_horizontal_scroll_box("出題プレビュー（横スクロールで全文確認）", question_text)
 
-    # リライト入力欄（不適と判定された場合にここで修正して再判定できる）
-    edited_sentence = st.text_area(
-        "作問用英文（要修正の場合はここでリライトして再判定）",
-        value=orig_sentence,
-        height=80,
-        key=f"edit_sent_{selected_idx}"
-    )
+st.markdown("**四択の選択肢（1つ目を正解として入力し、出題時にシャッフルする想定）**")
+c1, c2 = st.columns(2)
+with c1:
+    opt_correct = st.text_input("選択肢1（★正解）", value=target_phrase, key=f"opt1_{selected_idx}")
+    opt_d2 = st.text_input("選択肢3（誤答肢2）", value="", key=f"opt3_{selected_idx}")
+with c2:
+    opt_d1 = st.text_input("選択肢2（誤答肢1）", value="", key=f"opt2_{selected_idx}")
+    opt_d3 = st.text_input("選択肢4（誤答肢3）", value="", key=f"opt4_{selected_idx}")
 
-    is_rewritten = (edited_sentence.strip() != orig_sentence.strip())
+st.markdown("**第2段階：一意性確認チェック**")
+chk_unique = st.checkbox(
+    "作成した4つの選択肢の中で、文脈上正解が1つだけに論理的に決まる（一意性確認済み）",
+    key=f"chk1_{selected_idx}"
+)
 
-    # リアルタイムで適性判定を実行
-    is_suitable, issues, suggestions, meta_features = evaluate_rasch_suitability(
-        edited_sentence,
-        target_phrase,
-        current_item.get("detected_grammars", [current_item.get("grammar_label", "")])
-    )
+q_id = st.text_input("登録用問題ID", value=f"Q_{current_item.get('item_id', uuid.uuid4().hex[:4])}", key=f"qid_{selected_idx}")
 
-    if is_suitable:
-        st.success("✅ **適性判定：OK（Rasch分析に適しています）**")
+if st.button("検証してSupabaseに「確認済み」として保存", type="primary", use_container_width=True):
+    options_list = [opt_correct, opt_d1, opt_d2, opt_d3]
+    val_errors = validate_question_options(question_text, options_list, opt_correct)
+
+    if not is_suitable:
+        st.error("第1段階の「Rasch分析適性判定」が要修正のままです。上の英文を修正して適性OKにしてから保存してください。")
+    elif val_errors:
+        for err in val_errors:
+            st.error(f"入力エラー：{err}")
+    elif not chk_unique:
+        st.error("一意性確認のチェックボックスにチェックを入れてください。")
     else:
-        st.warning("⚠️ **適性判定：要修正（Rasch分析の前提を損なう恐れがあります）**")
-        for iss, sug in zip(issues, suggestions):
-            st.markdown(f"- {iss}\n  - 💡 **修正案：** {sug}")
-
-    with st.expander("抽出された英文特徴メタデータ（分析用）"):
-        st.json(meta_features)
-
-# =========================================================
-# 右カラム：第2段階（作問支援UI・選択肢作成・一意性検証）
-# =========================================================
-with col_right:
-    st.subheader("✏️ 第2段階：作問支援UI・一意性検証")
-
-    # 対象箇所を自動空欄化した雛形を生成
-    if target_phrase and target_phrase in edited_sentence:
-        template_q = edited_sentence.replace(target_phrase, "(      )", 1)
-    else:
-        template_q = edited_sentence
-
-    question_text = st.text_area(
-        "問題文（空欄は `(      )` で表記）",
-        value=template_q,
-        height=80,
-        key=f"q_text_{selected_idx}"
-    )
-
-    st.markdown("**四択の選択肢（1つ目を正解として入力し、出題時にシャッフルする想定）**")
-    c1, c2 = st.columns(2)
-    with c1:
-        opt_correct = st.text_input("選択肢1（★正解）", value=target_phrase, key=f"opt1_{selected_idx}")
-        opt_d2 = st.text_input("選択肢3（誤答肢2）", value="", key=f"opt3_{selected_idx}")
-    with c2:
-        opt_d1 = st.text_input("選択肢2（誤答肢1）", value="", key=f"opt2_{selected_idx}")
-        opt_d3 = st.text_input("選択肢4（誤答肢3）", value="", key=f"opt4_{selected_idx}")
-
-    explanation = st.text_area(
-        "解説文（全問回答後に学習者へ表示）",
-        value="",
-        placeholder="例：後ろに by the strong wind（〜によって）があるため、受動態（be動詞＋過去分詞）の broken が正解になります。",
-        height=90,
-        key=f"exp_{selected_idx}"
-    )
-
-    st.markdown("**第2段階：一意性・品質確認チェックリスト**")
-    chk_unique = st.checkbox("作成した4つの選択肢の中で、文脈上正解が1つだけに論理的に決まる（一意性確認済み）", key=f"chk1_{selected_idx}")
-    chk_exp = st.checkbox("誤答肢が不正解である理由も含め、解説が学習者に分かりやすい", key=f"chk2_{selected_idx}")
-
-    q_id = st.text_input("登録用問題ID", value=f"Q_{current_item.get('item_id', uuid.uuid4().hex[:4])}", key=f"qid_{selected_idx}")
-
-    if st.button("検証してSupabaseに「確認済み」として保存", type="primary", use_container_width=True):
-        options_list = [opt_correct, opt_d1, opt_d2, opt_d3]
-        val_errors = validate_question_options(question_text, options_list, opt_correct)
-
-        if not is_suitable:
-            st.error("第1段階の「Rasch分析適性判定」が要修正のままです。左側の英文を修正して適性OKにしてから保存してください。")
-        elif val_errors:
-            for err in val_errors:
-                st.error(f"入力エラー：{err}")
-        elif not explanation.strip():
-            st.error("解説文を入力してください。")
-        elif not (chk_unique and chk_exp):
-            st.error("一意性・品質確認のチェックボックス2つにチェックを入れてください。")
-        else:
-            record = {
-                "question_id": q_id.strip(),
-                "grammar_label": current_item.get("grammar_label", ""),
-                "source_sentence": orig_sentence,
-                "rewritten_sentence": edited_sentence,
-                "question_text": question_text.strip(),
-                "options": [o.strip() for o in options_list],
-                "correct_answer": opt_correct.strip(),
-                "explanation": explanation.strip(),
-                "suitability_status": "suitable",
-                "is_rewritten": is_rewritten,
-                "review_status": "confirmed",
-                "meta_features": meta_features
-            }
-            try:
-                save_question_to_db(record)
-                st.success(f"🎉 問題 `{q_id}` を確認済み問題としてSupabaseに保存しました！")
-            except Exception as e:
-                st.error(f"DB保存エラー: {e}")
+        record = {
+            "question_id": q_id.strip(),
+            "grammar_label": current_item.get("grammar_label", ""),
+            "source_sentence": orig_sentence,
+            "rewritten_sentence": edited_sentence,
+            "question_text": question_text.strip(),
+            "options": [o.strip() for o in options_list],
+            "correct_answer": opt_correct.strip(),
+            "explanation": "",  # 今回は解説入力を省略
+            "suitability_status": "suitable",
+            "is_rewritten": is_rewritten,
+            "review_status": "confirmed",
+            "meta_features": meta_features
+        }
+        try:
+            save_question_to_db(record)
+            st.success(f"🎉 問題 `{q_id}` を確認済み問題としてSupabaseに保存しました！")
+        except Exception as e:
+            st.error(f"DB保存エラー: {e}")
