@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import psycopg2
 from psycopg2.extras import Json
 import json
@@ -166,25 +165,9 @@ if "scroll_to_top" not in st.session_state:
 def on_item_change():
     st.session_state.scroll_to_top = True
 
-# --- サイドバー：作問対象選択（最上部）＋ JSON読込 ---
+# --- サイドバー：1. JSON読込（上） → 2. 作問対象選択（下） ---
 with st.sidebar:
-    if "json_items" in st.session_state and st.session_state.json_items:
-        st.header("1. 作問対象の英文を選択")
-        items = st.session_state.json_items
-        item_labels = [
-            f"{it.get('item_id', idx)} | [{it.get('grammar_label', '不明')}] {it.get('sentence', '')}"
-            for idx, it in enumerate(items)
-        ]
-        selected_idx = st.selectbox(
-            "問題を選択（変更で画面上部へ移動）：",
-            range(len(items)),
-            format_func=lambda i: item_labels[i],
-            key="selected_json_idx",
-            on_change=on_item_change
-        )
-        st.divider()
-
-    st.header("2. 文法判定JSONの読込")
+    st.header("1. 文法判定JSONの読込")
     uploaded_file = st.file_uploader("判定結果JSONファイルをアップロード", type=["json"])
 
     if uploaded_file is not None:
@@ -201,27 +184,44 @@ with st.sidebar:
         st.session_state.scroll_to_top = True
         st.rerun()
 
+    if "json_items" in st.session_state and st.session_state.json_items:
+        st.divider()
+        st.header("2. 作問対象の英文を選択")
+        items = st.session_state.json_items
+        item_labels = [
+            f"{it.get('item_id', idx)} | [{it.get('grammar_label', '不明')}] {it.get('sentence', '')}"
+            for idx, it in enumerate(items)
+        ]
+        st.selectbox(
+            "問題を選択（変更で画面上部へ移動）：",
+            range(len(items)),
+            format_func=lambda i: item_labels[i],
+            key="selected_json_idx",
+            on_change=on_item_change
+        )
+
 # 対象が変更された直後は画面の一番上へスクロールさせる
 if st.session_state.scroll_to_top:
     st.session_state.scroll_to_top = False
-    components.html(
-        """
-        <script>
-            const mainSection = window.parent.document.querySelector('section.main');
-            if (mainSection) {
-                mainSection.scrollTo({top: 0, behavior: 'smooth'});
-            }
-            window.parent.scrollTo({top: 0, behavior: 'smooth'});
-        </script>
-        """,
-        height=0
-    )
+    scroll_js = """
+    <script>
+        const mainSection = window.parent.document.querySelector('section.main');
+        if (mainSection) {
+            mainSection.scrollTo({top: 0, behavior: 'smooth'});
+        }
+        window.parent.scrollTo({top: 0, behavior: 'smooth'});
+    </script>
+    """
+    if hasattr(st, "iframe"):
+        st.iframe(scroll_js, height=0)
+    else:
+        st.components.v1.html(scroll_js, height=0)
 
 # ---------------------------------------------------------
 # 5. メインUI
 # ---------------------------------------------------------
 st.title("🛠️ Rasch分析適性判定・作問支援ツール（プロトタイプ）")
-st.caption("JSON読込 → 第1段階：Rasch適性判定・リライト支援 → 第2段階：四択作成・一意性検証 → DB登録")
+st.caption("JSON読込 → 第1段階：Rasch適性判定・リライト支援 → 第2段階：四択・解説作成・一意性検証 → DB登録")
 
 if "json_items" not in st.session_state or not st.session_state.json_items:
     st.info("👈 左のサイドバーから文法判定JSONをアップロードするか、「サンプルJSONを読み込む」を押してください。")
@@ -301,6 +301,18 @@ with c2:
     opt_d1 = st.text_input("選択肢2（誤答肢1）", value="", key=f"opt2_{selected_idx}")
     opt_d3 = st.text_input("選択肢4（誤答肢3）", value="", key=f"opt4_{selected_idx}")
 
+# 解説文入力欄（任意：空欄の場合は警告を表示しつつ保存可能）
+explanation = st.text_area(
+    "解説文（任意・全問回答後に学習者へ表示）",
+    value="",
+    placeholder="例：後ろに by the strong wind（〜によって）があるため、受動態（be動詞＋過去分詞）の broken が正解になります。",
+    height=85,
+    key=f"exp_{selected_idx}"
+)
+
+if not explanation.strip():
+    st.warning("⚠️ 解説文が入力されていません（空欄のままでもSupabaseへ保存できます）。")
+
 st.info("ℹ️ **一意性確認**：作成した4つの選択肢の中で、文脈上正解が1つだけに論理的に決まることを確認してから保存してください。")
 
 q_id = st.text_input("登録用問題ID", value=f"Q_{current_item.get('item_id', uuid.uuid4().hex[:4])}", key=f"qid_{selected_idx}")
@@ -323,7 +335,7 @@ if st.button("検証してSupabaseに「確認済み」として保存", type="p
             "question_text": question_text.strip(),
             "options": [o.strip() for o in options_list],
             "correct_answer": opt_correct.strip(),
-            "explanation": "",
+            "explanation": explanation.strip(),
             "suitability_status": "suitable",
             "is_rewritten": is_rewritten,
             "review_status": "confirmed",
@@ -331,6 +343,9 @@ if st.button("検証してSupabaseに「確認済み」として保存", type="p
         }
         try:
             save_question_to_db(record)
-            st.success(f"🎉 問題 `{q_id}` を確認済み問題としてSupabaseに保存しました！")
+            if explanation.strip():
+                st.success(f"🎉 問題 `{q_id}` を確認済み問題としてSupabaseに保存しました！")
+            else:
+                st.success(f"🎉 問題 `{q_id}` を確認済み問題としてSupabaseに保存しました（※解説文は空欄で登録されました）。")
         except Exception as e:
             st.error(f"DB保存エラー: {e}")
