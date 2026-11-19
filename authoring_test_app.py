@@ -213,9 +213,9 @@ if st.session_state.scroll_to_top:
     </script>
     """
     if hasattr(st, "iframe"):
-        st.iframe(scroll_js, height=0)
+        st.iframe(scroll_js, height=1)
     else:
-        st.components.v1.html(scroll_js, height=0)
+        st.components.v1.html(scroll_js, height=1)
 
 # ---------------------------------------------------------
 # 5. メインUI
